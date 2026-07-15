@@ -1,0 +1,6 @@
+# Default code owners.
+# Each line is a GitHub-style CODEOWNERS entry; anyone listed is
+# auto-requested as a reviewer on a PR that touches the file.
+
+# Global owner for everything not matched below.
+*       @thiyane-xavier

@@ -1,6 +1,35 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & local config — never commit
 .env
+.env.local
+.env.*.local
+
+# Data and build artifacts
 data/*.db
 data/*.parquet
-.pytest_cache/
+data/_handoff.parquet
+data/notify_log.jsonl
+data/notify_log.jsonl.*
+
+# Airflow
+logs/
+airflow.cfg
+airflow.db
+unittests.cfg

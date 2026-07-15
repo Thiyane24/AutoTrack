@@ -1,11 +1,11 @@
 """Unit tests for the silver layer."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
 
-import silver
+from autotrack import silver
 
 
 # ─────────────────────────────────────────
@@ -29,9 +29,7 @@ class TestClassifyStatus:
         assert silver.classify_status("Hello", "Just saying hi.") == "unknown"
 
     def test_rejection_takes_priority_over_acceptance(self):
-        # The 'offer' keyword is gone from ACCEPTANCE_KEYWORDS, but
-        # a sentence that contains both a rejection and an acceptance
-        # signal must still classify as rejected.
+        # A sentence with both signals must still classify as rejected.
         assert silver.classify_status(
             "Update",
             "We regret to inform you. Please consider us for future opportunities.",
@@ -41,6 +39,13 @@ class TestClassifyStatus:
         assert silver.classify_status(
             "UPDATE", "UNFORTUNATELY WE CANNOT PROCEED"
         ) == "rejected"
+
+    def test_empty_input_is_unknown(self):
+        assert silver.classify_status("", "") == "unknown"
+
+    def test_none_input_is_unknown(self):
+        # The function should not crash on None.
+        assert silver.classify_status(None, None) == "unknown"  # type: ignore[arg-type]
 
 
 # ─────────────────────────────────────────
@@ -131,11 +136,14 @@ class TestExtractCompanyAndPosition:
         assert comp == "Stripe"
 
     def test_at_intern_form(self):
+        # "Backend Intern at Microsoft" — bug in v1 returned
+        # "Backend" instead of "Backend Intern" because the regex
+        # used a non-capturing alternation that ate the word.
         pos, comp = silver.extract_company_and_position(
             "Backend Intern at Microsoft",
             "noreply@microsoft.com",
         )
-        assert pos == "Backend"
+        assert pos == "Backend Intern"
         assert comp == "Microsoft"
 
     def test_pipe_with_at(self):
@@ -172,7 +180,7 @@ class TestExtractCompanyAndPosition:
 class TestParseDateReceived:
     def test_standard_rfc2822(self):
         d = silver.parse_date_received("Tue, 14 Jul 2026 09:42:11 +0000")
-        assert d == datetime(2026, 7, 14, 9, 42, 11, tzinfo=d.tzinfo)
+        assert d == datetime(2026, 7, 14, 9, 42, 11, tzinfo=timezone.utc)
 
     def test_empty(self):
         assert silver.parse_date_received("") is None
@@ -189,11 +197,7 @@ class TestRunSilver:
     def test_empty_input_returns_empty_df_with_schema(self):
         df = silver.run_silver([])
         assert df.empty
-        for col in (
-            "message_id", "email_uid", "sender", "sender_domain",
-            "company_name", "position", "subject", "date_received",
-            "body_clean", "status", "alerta_enviado", "scraped_at",
-        ):
+        for col in silver.SILVER_COLUMNS:
             assert col in df.columns
 
     def test_three_records_produce_three_rows(self, sample_raw_records):
@@ -234,9 +238,18 @@ class TestRunSilver:
 
     def test_alerta_enviado_defaults_to_false(self, sample_raw_records):
         df = silver.run_silver(sample_raw_records)
-        assert df["alerta_enviado"].all() is False
+        # `bool(df["alerta_enviado"].all())` because numpy.bool_ is
+        # not the same object as Python's False.
+        assert not df["alerta_enviado"].any()
 
     def test_sender_domain_extracted(self, sample_raw_records):
         df = silver.run_silver(sample_raw_records)
         assert "grab.com" in df["sender_domain"].values
         assert "stripe.com" in df["sender_domain"].values
+
+    def test_subject_preserved_not_lowercased(self, sample_raw_records):
+        """v1 bug: subject was stored lowercased. v2 keeps the
+        original casing for display in any UI."""
+        df = silver.run_silver(sample_raw_records)
+        grab_row = df[df["email_uid"] == "101"].iloc[0]
+        assert grab_row["subject"] == "Application for Software Engineer Intern - Grab"

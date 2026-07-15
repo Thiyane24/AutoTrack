@@ -1,7 +1,10 @@
 version: '3.8'
 
-x-airflow-common:
-  &airflow-common
+# Base config shared by all Airflow services. The YAML anchor
+# ``&airflow-common`` is referenced via ``<<: *airflow-common`` in
+# each service below. This keeps the four services in sync without
+# repeating 30 lines of YAML four times.
+x-airflow-common: &airflow-common
   build: .
   environment:
     &airflow-common-env
@@ -9,12 +12,28 @@ x-airflow-common:
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    # Adiciona a pasta src ao path do Python para podermos importar as nossas funções nos DAGs
-    PYTHONPATH: '/opt/airflow/src' 
+    # LOG_LEVEL is read by autotrack.logging on first use.
+    LOG_LEVEL: 'INFO'
+    # PYTHONPATH: /opt/airflow/src lets Airflow import the
+    # `autotrack` package (mounted at /opt/airflow/src via volumes).
+    PYTHONPATH: '/opt/airflow/src'
+    # Credentials are loaded from .env in dev; in production
+    # override with a secrets manager (see .env.example).
+    GMAIL_ADDRESS: ${GMAIL_ADDRESS:-}
+    GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+    META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+    PHONE_NUMBER_ID: ${PHONE_NUMBER_ID:-}
+    DESTINATION_PHONE: ${DESTINATION_PHONE:-}
   volumes:
-    - ./dags:/opt/airflow/dags
-    - ./src:/opt/airflow/src
+    # DAG definitions are mounted read-only-ish: Airflow only needs
+    # to read them. Source code is mounted so `pip install -e` is
+    # not required and tests can use the same files.
+    - ./dags:/opt/airflow/dags:ro
+    - ./src:/opt/airflow/src:ro
     - ./data:/opt/airflow/data
+    # Logs persist across restarts so a debugging session can
+    # inspect a previous run's failure.
+    - ./logs:/opt/airflow/logs
   depends_on:
     - postgres
 
@@ -22,11 +41,17 @@ services:
   postgres:
     image: postgres:13
     environment:
+      # Default dev creds. Override in production via a secrets
+      # manager; do not commit production passwords.
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      retries: 5
 
   airflow-init:
     <<: *airflow-common
@@ -35,8 +60,8 @@ services:
       <<: *airflow-common-env
       _AIRFLOW_DB_UPGRADE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
 
   airflow-webserver:
     <<: *airflow-common

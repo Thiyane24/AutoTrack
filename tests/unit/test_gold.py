@@ -3,8 +3,7 @@
 import pandas as pd
 import pytest
 
-import gold
-import silver
+from autotrack import gold, silver
 
 
 def _make_df(records: list[dict]) -> pd.DataFrame:
@@ -99,3 +98,9 @@ class TestGoldUpsert:
         # Every row should be present and have alerta_enviado = False.
         assert len(rows) == 3
         assert all(r[1] is False or r[1] == 0 for r in rows)
+
+    def test_missing_columns_raises(self, tmp_duckdb_path):
+        """A silver-DataFrame contract violation should fail loudly."""
+        bad = pd.DataFrame({"message_id": ["<a@b.com>"]})
+        with pytest.raises(gold.GoldError):
+            gold.run_gold(bad, db_path=tmp_duckdb_path)

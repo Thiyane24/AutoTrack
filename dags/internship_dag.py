@@ -7,25 +7,35 @@ Tasks:
     load      -> run_gold  (DuckDB upsert)
     notify    -> run_notify (WhatsApp)
 
-Each task has its own retry policy per PRD §5.2:
-3 retries, exponential backoff. notify is the noisiest in practice
-(Meta API flakiness) so it gets the same policy but its delays are
+Each task has its own retry policy per PRD §5.2: 3 retries,
+exponential backoff. notify is the noisiest in practice (Meta
+API flakiness) so it gets the same policy but its delays are
 slightly more spread out via the underlying notify layer.
+
+The DAG file lives in ``dags/`` (where Airflow picks it up) and
+imports from the installed ``autotrack`` package. The package is
+added to PYTHONPATH by the docker-compose volume mount that maps
+``./src`` to ``/opt/airflow/src`` and the ``PYTHONPATH: /opt/airflow/src``
+environment variable in the airflow-common block.
 """
 
+from __future__ import annotations
+
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-import sys
-# dags/src/ is on PYTHONPATH (/opt/airflow/src) per docker-compose,
-# but we add it defensively for local DAG-parsing scenarios.
-SRC = "/opt/airflow/src"
-if SRC not in sys.path:
-    sys.path.insert(0, SRC)
+# Make the package importable when this file is parsed by Airflow
+# outside of the container (e.g. local ``airflow dags list``). In
+# the container, PYTHONPATH is already set by docker-compose.
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-import pipeline  # noqa: E402
+from autotrack import pipeline  # noqa: E402
 
 # ─────────────────────────────────────────
 # DEFAULT ARGS
