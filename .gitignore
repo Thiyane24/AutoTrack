@@ -23,8 +23,10 @@ htmlcov/
 
 # Data and build artifacts
 data/*.db
+data/*.duckdb
 data/*.parquet
 data/_handoff.parquet
+data/bronze/
 data/notify_log.jsonl
 data/notify_log.jsonl.*
 
