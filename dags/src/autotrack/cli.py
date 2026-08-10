@@ -18,9 +18,10 @@ import json
 import sys
 from typing import Sequence
 
-from autotrack import __version__, pipeline
+from autotrack import pipeline
 from autotrack.config import load_settings
 from autotrack.logging import configure, get_logger
+from autotrack import __version__
 
 log = get_logger(__name__)
 

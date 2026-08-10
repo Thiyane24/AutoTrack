@@ -14,12 +14,13 @@ asserts that:
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
 
-from autotrack import bronze, gold, notify, pipeline, silver
+from autotrack import silver
+from autotrack import bronze, gold, notify, pipeline
 
 
 # ─────────────────────────────────────────
@@ -95,9 +96,13 @@ class FakeIMAP:
             uids = b" ".join(uid for uid, _ in self.EMAILS)
             return ("OK", [uids])
         if command == "FETCH":
-            # Parse the UID from the query bytes.
+            # The UID is passed as the ``charset`` arg by our caller
+            # (``mail.uid("FETCH", email_uid, "(RFC822)")`` maps to
+            # ``command="FETCH", charset=email_uid, query="(RFC822)"``).
+            # Normalize it to bytes for comparison with our EMAILS keys.
+            uid_bytes = charset.encode() if isinstance(charset, str) else charset
             for uid, raw in self.EMAILS:
-                if uid in query:
+                if uid_bytes == uid:
                     return ("OK", [(b"", raw)])
             return ("NO", [b""])
         return ("NO", [b""])
@@ -130,15 +135,21 @@ class TestFullPipeline:
         # Stub IMAP so bronze doesn't hit the network.
         with patch.object(
             bronze.imaplib, "IMAP4_SSL", side_effect=lambda *a, **kw: FakeIMAP()
-        ):
+        ), patch.object(notify.smtplib, "SMTP") as smtp_mock:
+            # SMTP succeeded -> marked alerted. This matches the
+            # test's previous "alerta_enviado=TRUE" assertion.
+            smtp_inst = MagicMock()
+            smtp_inst.__enter__ = lambda s: smtp_inst
+            smtp_inst.__exit__ = lambda s, *a: False
+            smtp_mock.return_value = smtp_inst
             summary = pipeline.run(settings=s)
 
-        # Bronze pulled 3, gold inserted 3, notify fell back on 2.
+        # Bronze pulled 3, gold inserted 3, notify sent 2 via mocked SMTP.
         assert summary["bronze"] == 3
         assert summary["gold"] == {"inserted": 3, "updated": 0}
-        assert summary["notify"]["fallback"] == 2
-        assert summary["notify"]["notified"] == 0
+        assert summary["notify"]["notified"] == 2
         assert summary["notify"]["failed"] == 0
+        assert summary["notify"]["fallback"] == 0
 
         # DuckDB has the rows with the right statuses.
         with duckdb.connect(str(s.duckdb_path)) as con:
@@ -155,15 +166,8 @@ class TestFullPipeline:
         # Two rows marked as alerted (the non-unknown ones).
         assert sum(1 for r in rows if r[2]) == 2
 
-        # Fallback log has 2 entries with the expected shape.
-        log_lines = s.notify_fallback_log.read_text(
-            encoding="utf-8"
-        ).strip().split("\n")
-        assert len(log_lines) == 2
-        for line in log_lines:
-            entry = json.loads(line)
-            assert "🚨" in entry["payload"]
-            assert "Rejeitado" in entry["payload"] or "Avanço" in entry["payload"]
+        # No fallback log written when SMTP succeeds.
+        assert not s.notify_fallback_log.exists()
 
     def test_idempotency(self, tmp_path, empty_settings):
         from autotrack.config import Settings
@@ -179,7 +183,11 @@ class TestFullPipeline:
 
         with patch.object(
             bronze.imaplib, "IMAP4_SSL", side_effect=lambda *a, **kw: FakeIMAP()
-        ):
+        ), patch.object(notify.smtplib, "SMTP") as smtp_mock:
+            smtp_inst = MagicMock()
+            smtp_inst.__enter__ = lambda s: smtp_inst
+            smtp_inst.__exit__ = lambda s, *a: False
+            smtp_mock.return_value = smtp_inst
             pipeline.run(settings=s)
             # Re-run: bronze returns 0 (fake IMAP returns same UIDs
             # but our search filter requires UNSEEN — since we never
@@ -191,18 +199,10 @@ class TestFullPipeline:
 
         # Second pass: gold sees the same message_ids and reports
         # them as updated. Notify sees alerta_enviado=TRUE and
-        # returns 0. Either of the two acceptable shapes:
-        #   {"inserted": 0, "updated": 0, ...} if the fake's UNSEEN
-        #     filter strips them out, or
-        #   {"inserted": 0, "updated": 3, ...} if they came through.
+        # returns 0.
         assert summary2["gold"]["inserted"] == 0
-
-        # The fallback log was not touched on the second run
-        # (all the non-unknown rows are already alerta_enviado=TRUE).
-        log_lines = s.notify_fallback_log.read_text(
-            encoding="utf-8"
-        ).strip().split("\n")
-        assert len(log_lines) == 2  # still 2 from the first run
+        assert summary2["notify"]["notified"] == 0
+        assert summary2["notify"]["fallback"] == 0
 
         # DuckDB still has exactly 3 rows.
         with duckdb.connect(str(s.duckdb_path)) as con:

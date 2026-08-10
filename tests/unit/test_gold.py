@@ -3,7 +3,8 @@
 import pandas as pd
 import pytest
 
-from autotrack import gold, silver
+from autotrack import silver
+from autotrack import gold
 
 
 def _make_df(records: list[dict]) -> pd.DataFrame:

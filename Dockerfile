@@ -23,6 +23,6 @@ COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
 # Make sure the source tree is on the path even if a developer
-# mounts over /opt/airflow/src at runtime. The mount in
+# mounts over /opt/airflow/dags/src at runtime. The mount in
 # docker-compose.yaml wins, so this is just a safety net.
-COPY --chown=airflow:root src /opt/airflow/src
+COPY --chown=airflow:root dags/src /opt/airflow/dags/src

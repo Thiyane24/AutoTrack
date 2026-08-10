@@ -14,14 +14,16 @@ discussions that have not been implemented do not belong here.
    to disk or sent to a log aggregator.
 3. **Hanging workers.** A flaky network keeps the IMAP/HTTP client open
    forever, blocking the Airflow worker and starving other DAGs.
-4. **Replay / double-send.** A retry of the notify task double-sends a
-   WhatsApp message to the user.
+4. **Replay / double-send.** A retry of the notify task double-sends an
+   email to the user.
 5. **Schema confusion.** A change to the silver DataFrame silently
    drops a column the gold layer expects, corrupting DuckDB.
 6. **Unauthorized placeholder credentials.** A user copies `.env.example`
-   to `.env` but forgets to fill in a real Meta token. The placeholder
-   is sent to Meta's API and the pipeline returns 401 every run.
-7. **Thundering-herd retries.** A brief Meta outage causes all
+   to `.env` but forgets to fill in a real Gmail App Password. The
+   placeholder is sent over SMTP and the pipeline either fails
+   authentication or, worse, silently relays through a default Gmail
+   draft folder.
+7. **Thundering-herd retries.** A brief Gmail SMTP outage causes all
    in-flight workers to retry at the same instant, prolonging the
    outage.
 
@@ -33,18 +35,18 @@ discussions that have not been implemented do not belong here.
 - `.env.example` ships with **empty** values for every credential.
 - `python-dotenv` is added to `requirements.txt` so the local dev
   flow is the same as production (env-vars via `.env`).
-- CI tests force `META_ACCESS_TOKEN=""` and friends to empty strings
-  so a leaked secret from a developer's local `.env` would not
-  reach the test run.
+- CI tests force `GMAIL_ADDRESS=""` and `GMAIL_APP_PASSWORD=""` to
+  empty strings so a leaked secret from a developer's local `.env`
+  would not reach the test run.
 
 ### 2. No credentials in logs or error messages
 
 - `bronze.connect_to_gmail` wraps any `imaplib.IMAP4.error` in a
   `BronzeError` that includes only the exception **type name**, not
   the message (which can include the username).
-- `notify._send_with_retry` deliberately logs the HTTP status code
-  but **not** the response body — Meta 4xx errors occasionally
-  echo a partial token in the body.
+- `notify._send_with_retry` deliberately logs the SMTP status code
+  but **not** the response body — Gmail SMTP 4xx errors occasionally
+  echo a partial token or password in the body.
 - The `Authorization: Bearer …` header is constructed in-place
   and never stringified elsewhere, so it cannot be captured by a
   broad `repr()` of the request object.
@@ -56,7 +58,7 @@ discussions that have not been implemented do not belong here.
 | Call               | Timeout env var                  | Default |
 |--------------------|----------------------------------|---------|
 | IMAP connect       | `AUTOTRACK_IMAP_TIMEOUT`         | 30 s    |
-| Meta HTTP          | `AUTOTRACK_NOTIFY_TIMEOUT`       | 10 s    |
+| SMTP send          | `AUTOTRACK_NOTIFY_TIMEOUT`       | 10 s    |
 
 A hung server can no longer block an Airflow worker indefinitely.
 
@@ -89,11 +91,10 @@ A hung server can no longer block an Airflow worker indefinitely.
 
 ### 7. Placeholder detection
 
-- `notify.creds_are_placeholder` returns `True` for empty strings
-  and the literal `"seu_token_aqui"` shipped in `.env.example`.
-- `Settings.has_meta_creds` re-checks this and the pipeline falls
-  back to a local JSONL log instead of hitting the API with
-  garbage credentials.
+- `Settings.has_notify_creds()` checks whether both `GMAIL_ADDRESS`
+  and `GMAIL_APP_PASSWORD` are non-empty. When they're not, the
+  pipeline falls back to a local JSONL log instead of relaying an
+  email with garbage credentials.
 
 ## Out of scope (acknowledged but not built)
 

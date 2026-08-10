@@ -23,9 +23,10 @@ from typing import Optional
 
 import pandas as pd
 
-from autotrack import bronze, gold, notify, silver
+from autotrack import silver
 from autotrack.config import Settings, load_settings
 from autotrack.logging import get_logger
+from autotrack import bronze, gold, notify
 
 log = get_logger(__name__)
 
@@ -119,7 +120,7 @@ def run_gold(
 def run_notify(
     settings: Optional[Settings] = None,
 ) -> dict:
-    """Notify task: send pending rows via WhatsApp (or fallback)."""
+    """Notify task: send pending rows via SMTP email (or fallback log)."""
     s = settings or load_settings()
     return notify.run_notify(settings=s)
 

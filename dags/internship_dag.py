@@ -5,18 +5,21 @@ Tasks:
     extract   -> run_bronze (writes Parquet handoff)
     transform -> run_silver (pass-through; keeps the 4-stage shape)
     load      -> run_gold  (DuckDB upsert)
-    notify    -> run_notify (WhatsApp)
+    notify    -> run_notify (SMTP email)
 
 Each task has its own retry policy per PRD §5.2: 3 retries,
-exponential backoff. notify is the noisiest in practice (Meta
-API flakiness) so it gets the same policy but its delays are
+exponential backoff. notify is the noisiest in practice (Gmail
+SMTP flakiness) so it gets the same policy but its delays are
 slightly more spread out via the underlying notify layer.
 
 The DAG file lives in ``dags/`` (where Airflow picks it up) and
-imports from the installed ``autotrack`` package. The package is
-added to PYTHONPATH by the docker-compose volume mount that maps
-``./src`` to ``/opt/airflow/src`` and the ``PYTHONPATH: /opt/airflow/src``
-environment variable in the airflow-common block.
+imports the ``autotrack`` package. In the container, the package
+is mounted at ``/opt/airflow/autotrack`` (via
+``./dags/src/autotrack:/opt/airflow/autotrack``) and
+``PYTHONPATH=/opt/airflow`` makes the bare ``autotrack`` name
+importable. When parsing this file outside the container (e.g.
+local ``airflow dags list``), the fallback below adds the
+package root to ``sys.path`` so the same import works.
 """
 
 from __future__ import annotations
@@ -26,14 +29,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
-# Make the package importable when this file is parsed by Airflow
-# outside of the container (e.g. local ``airflow dags list``). In
-# the container, PYTHONPATH is already set by docker-compose.
-SRC = Path(__file__).resolve().parents[1] / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+# Local-dev fallback: when this DAG file is parsed outside the
+# container (e.g. ``pytest`` or ``airflow dags list`` on the host),
+# the ``autotrack`` package isn't on PYTHONPATH. Add
+# ``dags/src`` so the bare ``autotrack`` import below resolves.
+# In the container, PYTHONPATH already covers this, so the
+# ``if`` guard keeps the change a no-op there.
+SRC_PARENT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_PARENT) not in sys.path:
+    sys.path.insert(0, str(SRC_PARENT))
 
 from autotrack import pipeline  # noqa: E402
 
@@ -58,7 +64,7 @@ default_args = {
 
 with DAG(
     dag_id="internship_dag",
-    description="AutoTrack: Gmail → Silver → DuckDB → WhatsApp",
+    description="AutoTrack: Gmail → Silver → DuckDB → Email",
     default_args=default_args,
     schedule="@hourly",
     start_date=datetime(2026, 1, 1),

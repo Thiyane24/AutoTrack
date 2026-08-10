@@ -6,7 +6,7 @@ The Medallion pattern (Bronze → Silver → Gold) gives us:
 
 - **Independent retries.** Airflow retries a single PythonOperator
   task; a multi-layer DAG means a partial pipeline failure (e.g.
-  Meta API 5xx) does not require re-fetching from Gmail.
+  Gmail SMTP 5xx) does not require re-fetching from Gmail.
 - **Independent testability.** Silver is pure (no I/O); unit tests
   run in milliseconds without Docker, IMAP, or DuckDB.
 - **Independent observability.** Each layer emits a distinct
@@ -17,7 +17,7 @@ The Medallion pattern (Bronze → Silver → Gold) gives us:
 ## Data flow
 
 ```
- Gmail IMAP                                 Meta Cloud API
+ Gmail IMAP                                 SMTP email
       │                                              ▲
       ▼                                              │
   ┌───────┐  raw list[dict]   ┌────────┐  DataFrame  ┌────────┐
@@ -26,15 +26,15 @@ The Medallion pattern (Bronze → Silver → Gold) gives us:
       │                                                       │
       │  bronze_n records extracted                            │
       ▼                                                       ▼
-   logs                                            DuckDB  (notified=0)
+   logs                                            DuckDB  (alerta_enviado=0)
                                                           │
                                                           ▼
                                                     ┌────────┐
-                                                    │ NOTIFY ├─► Meta API
+                                                    │ NOTIFY ├─► SMTP email
                                                     └────────┘
                                                           │
                                                           ▼
-                                                DuckDB  (notified=N)
+                                                DuckDB  (alerta_enviado=1)
 ```
 
 The bronze task already produces a silver DataFrame in-process

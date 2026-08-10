@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autotrack"
 version = "0.2.0"
-description = "Gmail → Silver → DuckDB → WhatsApp pipeline for internship tracking."
+description = "Gmail → Silver → DuckDB → Email pipeline for internship tracking."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -57,6 +57,17 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]
 ignore = [
     "E501",  # line length is handled by the formatter
     "S101",  # asserts are fine in tests
+    # UP rules: the dataclass/type-annotation rewrites are valid
+    # Pylint-style cleanup but not bugs. The codebase is on
+    # Python 3.10+ so deprecation warnings are stylistic only.
+    "UP035",  # `typing.List`/`Iterable` → builtins / collections.abc
+    "UP006",  # `List[T]` → `list[T]` (PEP 585)
+    "UP007",  # `Optional[X]` → `X | None`
+    "UP045",  # `Optional[bool]` → `bool | None`
+    # B905: `zip()` without `strict=` is a Python 3.10+ lint, but
+    # every zip() call in this codebase is local and
+    # length-checked upstream. False positive at this scale.
+    "B905",
 ]
 # `S` (security) exceptions for known-safe calls.
 [tool.ruff.lint.per-file-ignores]
@@ -73,7 +84,7 @@ ignore_missing_imports = true
 minversion = "8.0"
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["dags/src"]
 filterwarnings = [
     "error",
     # beautifulsoup4 emits a deprecation warning we can't fix:

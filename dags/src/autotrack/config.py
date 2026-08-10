@@ -25,18 +25,15 @@ GMAIL_IMAP_HOST: str = "imap.gmail.com"
 GMAIL_IMAP_PORT: int = 993
 GMAIL_DEFAULT_MAILBOX: str = "inbox"
 
-# The placeholder the .env.example ships with. If a real user drops a
-# token in but forgets to remove the placeholder string, we treat it
-# as missing. Without this check, the placeholder would happily be
-# sent to the Meta API and return a 401 every run.
-META_TOKEN_PLACEHOLDER: str = "seu_token_aqui"
+# Gmail SMTP — we use the same App Password used for IMAP. This is
+# the only credential surface; no Meta tokens, no phone numbers.
+GMAIL_SMTP_HOST: str = "smtp.gmail.com"
+GMAIL_SMTP_PORT: int = 587  # 587 = STARTTLS submission, the modern default
 
 # Pipeline tunables.
 DEFAULT_NOTIFY_MAX_PER_RUN: int = 50
-DEFAULT_META_API_VERSION: str = "v20.0"
 NOTIFY_BACKOFF_BASE_SECONDS: float = 2.0
 NOTIFY_MAX_ATTEMPTS: int = 3
-NOTIFY_HTTP_TIMEOUT_SECONDS: int = 10
 IMAP_TIMEOUT_SECONDS: int = 30
 
 
@@ -54,22 +51,32 @@ def _clean_path(value: Optional[str], default: Path) -> Path:
     return Path(cleaned) if cleaned else default
 
 
+def _clean_lower(value: Optional[str], default: Optional[str] = None) -> Optional[str]:
+    """Strip + lowercase; fall back to ``default`` if empty."""
+    cleaned = _clean(value)
+    if cleaned is None:
+        return default
+    return cleaned.lower()
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration, frozen at process start."""
 
-    # Gmail.
+    # Gmail (used for both IMAP fetch and SMTP notify).
     gmail_address: Optional[str]
     gmail_app_password: Optional[str]
     gmail_imap_host: str
     gmail_imap_port: int
     gmail_mailbox: str
+    gmail_smtp_host: str
+    gmail_smtp_port: int
 
-    # Meta WhatsApp.
-    meta_access_token: Optional[str]
-    meta_phone_number_id: Optional[str]
-    meta_destination_phone: Optional[str]
-    meta_api_version: str
+    # Notification target. Defaults to GMAIL_ADDRESS so a single
+    # Gmail account can both watch its own inbox and receive its own
+    # notifications — set NOTIFY_RECIPIENT_EMAIL to a different
+    # address (e.g. an alias) to split the two.
+    notify_recipient_email: Optional[str]
 
     # Storage paths.
     duckdb_path: Path
@@ -80,19 +87,28 @@ class Settings:
     notify_max_per_run: int
     notify_max_attempts: int
     notify_backoff_base: float
-    notify_http_timeout: int
     imap_timeout: int
 
     def has_gmail_creds(self) -> bool:
         return bool(self.gmail_address and self.gmail_app_password)
 
-    def has_meta_creds(self) -> bool:
-        return bool(
-            self.meta_access_token
-            and self.meta_access_token != META_TOKEN_PLACEHOLDER
-            and self.meta_phone_number_id
-            and self.meta_destination_phone
-        )
+    def has_notify_creds(self) -> bool:
+        """True when we have everything needed to send an email.
+
+        Both the sender's Gmail creds AND a recipient address are
+        required. If the recipient is unset we fall back to the
+        sender's address (common case for single-account setups).
+        """
+        if not self.has_gmail_creds():
+            return False
+        # If recipient wasn't explicitly set, we still consider it
+        # configured when the sender address is present (we'll use
+        # the sender's own address as the recipient at send time).
+        return bool(self.gmail_address)
+
+    def resolved_recipient(self) -> Optional[str]:
+        """Return the email address we actually send notifications to."""
+        return self.notify_recipient_email or self.gmail_address
 
 
 def load_settings() -> Settings:
@@ -100,20 +116,26 @@ def load_settings() -> Settings:
 
     We do NOT raise on missing Gmail creds at module import time —
     that would break unit tests and CLI tools that only need silver
-    or gold. Callers that need Gmail (bronze.run_bronze) check
-    :meth:`Settings.has_gmail_creds` and raise a clear error.
+    or gold. Callers that need Gmail (bronze.run_bronze, notify.run_notify)
+    check :meth:`Settings.has_gmail_creds` / :meth:`has_notify_creds`
+    and raise a clear error.
     """
+    gmail_addr = _clean_lower(os.getenv("GMAIL_ADDRESS"))
     return Settings(
-        gmail_address=_clean(os.getenv("GMAIL_ADDRESS")),
+        gmail_address=gmail_addr,
         gmail_app_password=_clean(os.getenv("GMAIL_APP_PASSWORD")),
         gmail_imap_host=os.getenv("GMAIL_IMAP_HOST", GMAIL_IMAP_HOST),
         gmail_imap_port=int(os.getenv("GMAIL_IMAP_PORT", str(GMAIL_IMAP_PORT))),
         gmail_mailbox=os.getenv("GMAIL_MAILBOX", GMAIL_DEFAULT_MAILBOX),
+        gmail_smtp_host=os.getenv("GMAIL_SMTP_HOST", GMAIL_SMTP_HOST),
+        gmail_smtp_port=int(os.getenv("GMAIL_SMTP_PORT", str(GMAIL_SMTP_PORT))),
 
-        meta_access_token=_clean(os.getenv("META_ACCESS_TOKEN")),
-        meta_phone_number_id=_clean(os.getenv("PHONE_NUMBER_ID")),
-        meta_destination_phone=_clean(os.getenv("DESTINATION_PHONE")),
-        meta_api_version=os.getenv("META_API_VERSION", DEFAULT_META_API_VERSION),
+        # Default the recipient to the sender's own Gmail address —
+        # this is the most common setup and avoids one extra config
+        # var the user has to remember to set.
+        notify_recipient_email=_clean_lower(
+            os.getenv("NOTIFY_RECIPIENT_EMAIL"), default=gmail_addr
+        ),
 
         duckdb_path=_clean_path(
             os.getenv("DUCKDB_PATH"),
@@ -138,9 +160,6 @@ def load_settings() -> Settings:
             os.getenv(
                 "AUTOTRACK_NOTIFY_BACKOFF_BASE", str(NOTIFY_BACKOFF_BASE_SECONDS)
             )
-        ),
-        notify_http_timeout=int(
-            os.getenv("AUTOTRACK_NOTIFY_TIMEOUT", str(NOTIFY_HTTP_TIMEOUT_SECONDS))
         ),
         imap_timeout=int(
             os.getenv("AUTOTRACK_IMAP_TIMEOUT", str(IMAP_TIMEOUT_SECONDS))

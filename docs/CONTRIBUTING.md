@@ -36,5 +36,5 @@ If you change a contract, update the corresponding test in
 - Integration tests are in `tests/integration/` and use a fake
   IMAP server.
 - Run `pytest` from the repo root. The `conftest.py` adds
-  `src/` to `sys.path` so `import autotrack` works without a
+  `dags/src/` to `sys.path` so `import autotrack` works without a
   prior `pip install -e`.

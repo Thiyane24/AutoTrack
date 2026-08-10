@@ -33,18 +33,20 @@ class TestSettings:
         assert s.has_gmail_creds() is True
 
     def test_meta_creds_check_rejects_placeholder(self, monkeypatch):
-        monkeypatch.setenv("META_ACCESS_TOKEN", "seu_token_aqui")
-        monkeypatch.setenv("PHONE_NUMBER_ID", "12345")
-        monkeypatch.setenv("DESTINATION_PHONE", "+15555550100")
+        # The Meta placeholder check no longer exists — the new
+        # `has_notify_creds` requires only Gmail sender creds.
+        monkeypatch.delenv("GMAIL_ADDRESS", raising=False)
+        monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
         s = config.load_settings()
-        assert s.has_meta_creds() is False
+        assert s.has_notify_creds() is False
 
     def test_meta_creds_check_accepts_real_token(self, monkeypatch):
-        monkeypatch.setenv("META_ACCESS_TOKEN", "EAAreal")
-        monkeypatch.setenv("PHONE_NUMBER_ID", "12345")
-        monkeypatch.setenv("DESTINATION_PHONE", "+15555550100")
+        monkeypatch.setenv("GMAIL_ADDRESS", "user@example.com")
+        monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
         s = config.load_settings()
-        assert s.has_meta_creds() is True
+        assert s.has_notify_creds() is True
+        # Recipient defaults to the sender's own address.
+        assert s.resolved_recipient() == "user@example.com"
 
 
 class TestLogging:

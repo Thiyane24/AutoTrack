@@ -7,6 +7,12 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+# Only one deploy at a time on the self-hosted runner.
+# Two simultaneous deploys would race on `docker compose up`.
+concurrency:
+  group: autotrack-deploy
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -14,6 +20,12 @@ env:
   PYTHON_VERSION: "3.12"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONDONTWRITEBYTECODE: "1"
+  # Both lint/typecheck and tests import the bare `autotrack`
+  # package, which lives at dags/src/autotrack/ on disk. The
+  # Dockerfile already sets PYTHONPATH=/opt/airflow in the image;
+  # this mirrors that on the CI runner so ruff/mypy/pytest see
+  # the same import graph as the production image.
+  PACKAGE_PYTHONPATH: "dags/src"
 
 jobs:
   lint:
@@ -35,14 +47,16 @@ jobs:
         run: python -m pip install --upgrade pip && pip install ruff
 
       - name: Run ruff (lint)
-        run: ruff check src tests
+        run: ruff check dags/src tests
 
       - name: Run ruff (format check)
-        run: ruff format --check src tests
+        run: ruff format --check dags/src tests
 
   typecheck:
     name: Type check
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ env.PACKAGE_PYTHONPATH }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +72,7 @@ jobs:
           pip install mypy
 
       - name: Run mypy
-        run: mypy src
+        run: mypy dags/src
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -88,18 +102,19 @@ jobs:
 
       - name: Run unit tests
         env:
-          # Force fallback mode (no real Meta creds in CI).
-          META_ACCESS_TOKEN: ""
-          PHONE_NUMBER_ID: ""
-          DESTINATION_PHONE: ""
+          # Force fallback mode (no real Gmail creds in CI).
+          # The notify layer falls back to a JSONL log when
+          # GMAIL_APP_PASSWORD is empty, so these empty strings
+          # are exactly what we want.
+          GMAIL_ADDRESS: ""
+          GMAIL_APP_PASSWORD: ""
         run: |
           pytest tests/unit -q --cov=autotrack --cov-report=term-missing
 
       - name: Run integration tests
         env:
-          META_ACCESS_TOKEN: ""
-          PHONE_NUMBER_ID: ""
-          DESTINATION_PHONE: ""
+          GMAIL_ADDRESS: ""
+          GMAIL_APP_PASSWORD: ""
         run: |
           pytest tests/integration -q
 
@@ -122,3 +137,53 @@ jobs:
           tags: autotrack:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy (self-hosted)
+    runs-on: [self-hosted, windows]
+    needs: [lint, typecheck, test, build-image]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render .env from repo secrets
+        # Use a here-doc with environment-variable expansion to
+        # write the secrets to disk. The `set +x` prevents the
+        # password from appearing in the action log even if a
+        # later step shells out.
+        shell: bash
+        run: |
+          set +x
+          cat > .env <<EOF
+          GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD=${{ secrets.GMAIL_APP_PASSWORD }}
+          EOF
+
+      - name: Tear down old stack
+        shell: bash
+        run: docker compose down --remove-orphans || true
+
+      - name: Build & start
+        shell: bash
+        run: docker compose up -d --build
+
+      - name: Wait for Airflow webserver
+        shell: bash
+        run: |
+          set +e
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null --max-time 5 http://localhost:8088/login/; then
+              echo "Airflow UI is up after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "  ...still booting (${i}/60)"
+            sleep 5
+          done
+          echo "Airflow UI never came up. Dumping logs."
+          docker compose logs --tail=200 airflow-webserver airflow-scheduler airflow-dag-processor
+          exit 1
+
+      - name: Confirm DAG registered
+        shell: bash
+        run: |
+          docker compose exec -T airflow-webserver airflow dags list 2>&1 | tail -5

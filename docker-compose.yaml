@@ -1,83 +1,113 @@
-version: '3.8'
-
 # Base config shared by all Airflow services. The YAML anchor
 # ``&airflow-common`` is referenced via ``<<: *airflow-common`` in
-# each service below. This keeps the four services in sync without
-# repeating 30 lines of YAML four times.
+# each service below. This keeps the three services in sync without
+# repeating config.
+#
+# Note: Airflow is configured with its built-in SQLite metadata DB
+# (no postgres service, no psycopg2). For production-scale multi-
+# worker setups, switch back to Postgres + psycopg2.
+
 x-airflow-common: &airflow-common
   build: .
   environment:
     &airflow-common-env
+    # Airflow uses SQLite for its own metadata DB; no driver needed.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'true'
+    # In Airflow 3.x, the LocalExecutor ships tasks to the
+    # api-server via the Execution API over HTTP. The scheduler
+    # container needs to reach the api-server container by name.
+    # AIRFLOW__API__BASE_URL points the client at the webserver's
+    # public URL; the in-cluster container name keeps the request
+    # on the docker network instead of bouncing through the host.
+    AIRFLOW__API__BASE_URL: 'http://airflow-webserver:8080'
     # LOG_LEVEL is read by autotrack.logging on first use.
     LOG_LEVEL: 'INFO'
-    # PYTHONPATH: /opt/airflow/src lets Airflow import the
-    # `autotrack` package (mounted at /opt/airflow/src via volumes).
-    PYTHONPATH: '/opt/airflow/src'
+    # PYTHONPATH: /opt/airflow lets Airflow import the bare
+    # `autotrack` package (the package root is mounted at
+    # /opt/airflow/autotrack via the volume block below, and
+    # /opt/airflow is what makes that name importable).
+    PYTHONPATH: '/opt/airflow'
     # Credentials are loaded from .env in dev; in production
     # override with a secrets manager (see .env.example).
     GMAIL_ADDRESS: ${GMAIL_ADDRESS:-}
     GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
-    META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
-    PHONE_NUMBER_ID: ${PHONE_NUMBER_ID:-}
-    DESTINATION_PHONE: ${DESTINATION_PHONE:-}
+    NOTIFY_RECIPIENT_EMAIL: ${NOTIFY_RECIPIENT_EMAIL:-}
   volumes:
     # DAG definitions are mounted read-only-ish: Airflow only needs
-    # to read them. Source code is mounted so `pip install -e` is
-    # not required and tests can use the same files.
+    # to read them. The package source is mounted at
+    # /opt/airflow/autotrack so it imports as bare `autotrack`
+    # (with PYTHONPATH=/opt/airflow). Mounting the package
+    # directly at /opt/airflow/autotrack also keeps Airflow from
+    # scanning its files as DAGs (they no longer live under
+    # /opt/airflow/dags/).
     - ./dags:/opt/airflow/dags:ro
-    - ./src:/opt/airflow/src:ro
+    - ./dags/src/autotrack:/opt/airflow/autotrack:ro
     - ./data:/opt/airflow/data
     # Logs persist across restarts so a debugging session can
     # inspect a previous run's failure.
     - ./logs:/opt/airflow/logs
-  depends_on:
-    - postgres
+    # Shared metadata DB so migration (run in airflow-init /
+    # airflow-db-migrate) is visible to webserver and scheduler.
+    # The DB file lives directly in AIRFLOW_HOME; the volume is
+    # created (and chown'd to airflow) by the init service.
+    - airflow-db:/opt/airflow
 
 services:
-  postgres:
-    image: postgres:13
-    environment:
-      # Default dev creds. Override in production via a secrets
-      # manager; do not commit production passwords.
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-    volumes:
-      - postgres-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
-      interval: 5s
-      retries: 5
-
   airflow-init:
     <<: *airflow-common
-    command: version
+    # When a named volume is mounted at /opt/airflow (for the
+    # SQLite DB to persist across containers), the empty volume
+    # starts owned by root and the airflow user can't write to
+    # it. Fix ownership before the entrypoint runs migrations.
+    command: bash -c "chown -R airflow:root /opt/airflow && exec /entrypoint version"
     environment:
       <<: *airflow-common-env
-      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_DB_MIGRATE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
 
+  airflow-db-migrate:
+    <<: *airflow-common
+    # Dedicated migration step; the webserver/scheduler wait for
+    # this to exit 0 before starting. Otherwise Airflow 3.x boots
+    # the scheduler before migrations complete and crashes.
+    # Re-chowns in case the named volume was recreated by
+    # `docker compose down -v`.
+    command: bash -c "chown -R airflow:root /opt/airflow && exec /entrypoint db migrate"
+    depends_on:
+      - airflow-init
+
   airflow-webserver:
     <<: *airflow-common
-    command: webserver
+    # Airflow 3.x renamed `webserver` -> `api-server`.
+    command: api-server
+    # Bound to 8088 on the host because Apache (EDB PEM HTTPD)
+    # already owns 8080 on Windows. The Airflow UI is reachable at
+    # http://localhost:8088.
     ports:
-      - "8080:8080"
+      - "8088:8080"
     depends_on:
-      - postgres
-      - airflow-init
+      - airflow-db-migrate
 
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     depends_on:
-      - postgres
-      - airflow-init
+      - airflow-db-migrate
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    # Airflow 3.x pulled DAG parsing out of the scheduler into a
+    # dedicated process. Without this, DAG files on disk are never
+    # loaded and `airflow dags list` reports "No data found".
+    command: dag-processor
+    depends_on:
+      - airflow-db-migrate
 
 volumes:
-  postgres-db-volume:
+  airflow-db:
